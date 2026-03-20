@@ -1,0 +1,35 @@
+roa_controller_node:
+  ros__parameters:
+    hw_rate_hz: 100.0
+    policy_rate_hz: 50.0
+    status_rate_hz: 10.0
+    rsu_timeout_ms: 50.0
+    cmd_timeout_ms: 50.0
+    imu_timeout_ms: 50.0
+    gravity_timeout_ms: 50.0
+    motor_state_timeout_ms: 50.0
+    policy_cmd_timeout_ms: 50.0
+
+    # 0이면 /motor_command publish 안 함
+    # HW가 요구하는 길이로 맞춰줘야 함 (미확정)
+    motor_command_len: 40
+
+    rsu_frame_id: base_link
+
+    topics:
+      walk_policy_cmd: /walk_policy/cmd_vel
+      imu_data: /imu/data
+      imu_gravity: /imu/gravity
+      rsu_solution: /rsu/solution
+      rsu_target: /rsu/target
+      motor_command: /hardware_interface/command
+      motor_state_sub: /hardware_interface/state
+      rsu_state_sub: /rsu/state
+
+# system_manager_node:
+#   ros__parameters:
+#     fsm_period_sec: 0.02
+#     controller_status_timeout_sec: 0.5
+#     lifecycle_service_timeout_sec: 1.0
+#     controller_status_topic: /controller/status
+#     controller_node_name: /roa_controller_node
