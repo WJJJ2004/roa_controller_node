@@ -59,6 +59,12 @@ target_include_directories(roa_controller_node PUBLIC
 #   RUNTIME DESTINATION lib/${PROJECT_NAME}
 # )
 
+install(TARGETS
+  roa_controller_node
+  # system_manager_node
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
 install(DIRECTORY include/
   DESTINATION include
 )
