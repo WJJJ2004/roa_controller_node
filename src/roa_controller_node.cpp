@@ -192,6 +192,10 @@ RoaControllerNode::on_shutdown(const rclcpp_lifecycle::State &)
 
 void RoaControllerNode::declareAndLoadParams()
 {
+  // control mode 
+  if (!this->has_parameter("REALTIME_CONTROL_MODE")) {
+    this->declare_parameter<bool>("declare_parameter", is_realtime_control_mode_);
+  }
   // rates
   if (!this->has_parameter("hw_rate_hz")) {
     this->declare_parameter<double>("hw_rate_hz", hw_rate_hz_);
@@ -262,7 +266,13 @@ void RoaControllerNode::declareAndLoadParams()
     this->declare_parameter<std::string>("topics.rsu_state_sub", topic_rsu_status_);
   }
 
-
+  if (is_realtime_control_mode_) {
+    control_mode_ = CONTROL_MODE::RT_CONTROL;
+  }
+  else {
+    control_mode_ = CONTROL_MODE::DEBUG;
+  }
+    
   // load rates
   hw_rate_hz_ = this->get_parameter("hw_rate_hz").as_double();
   policy_rate_hz_ = this->get_parameter("policy_rate_hz").as_double();
@@ -730,8 +740,42 @@ void RoaControllerNode::ControlLoop()
   sanitize(cmd.right_rsu_upper);
   sanitize(cmd.right_rsu_lower);
 
-  auto msg = PacketManager::build(cmd, this->now(), "hardware_interface");
-  motor_packit_pub_->publish(msg);
+  if (control_mode_ == CONTROL_MODE::RT_CONTROL) {
+    auto msg = PacketManager::build(cmd, this->now(), "hardware_interface");
+    motor_packit_pub_->publish(msg);
+  }
+  else {
+    // DEBUG mode: send initial position to hardware, print command for debugging
+    PacketManager::Command12Dof init_pos;
+    init_pos.left_hip_pitch   = -20.0f * M_PI / 180.0f;  // -20 degrees
+    init_pos.left_hip_roll    = 0.0f;
+    init_pos.left_hip_yaw     = 0.0f;
+    init_pos.left_knee_pitch  = 50.0f * M_PI / 180.0f;   // 50 degrees
+    
+    init_pos.right_hip_pitch  = 20.0f * M_PI / 180.0f;   // 20 degrees
+    init_pos.right_hip_roll   = 0.0f;
+    init_pos.right_hip_yaw    = 0.0f;
+    init_pos.right_knee_pitch = -50.0f * M_PI / 180.0f;  // -50 degrees
+    
+    init_pos.left_rsu_upper   = 30.0f * M_PI / 180.0f;   // 30 degrees
+    init_pos.left_rsu_lower   = -30.0f * M_PI / 180.0f;  // -30 degrees
+    init_pos.right_rsu_upper  = -30.0f * M_PI / 180.0f;  // -30 degrees
+    init_pos.right_rsu_lower  = 30.0f * M_PI / 180.0f;   // 30 degrees
+    
+    // Send initial position to hardware
+    auto msg = PacketManager::build(init_pos, this->now(), "hardware_interface");
+    motor_packit_pub_->publish(msg);
+
+    // Print computed command for debugging
+    RCLCPP_DEBUG(get_logger(), 
+      "[DEBUG] Policy Cmd - Hip: L(%.3f,%.3f) R(%.3f,%.3f) | "
+      "Knee: L%.3f R%.3f | RSU: L(%.3f,%.3f) R(%.3f,%.3f)",
+      cmd.left_hip_pitch, cmd.left_hip_roll,
+      cmd.right_hip_pitch, cmd.right_hip_roll,
+      cmd.left_knee_pitch, cmd.right_knee_pitch,
+      cmd.left_rsu_upper, cmd.left_rsu_lower,
+      cmd.right_rsu_upper, cmd.right_rsu_lower);
+  }
 }
 
 void RoaControllerNode::publish_controller_status()

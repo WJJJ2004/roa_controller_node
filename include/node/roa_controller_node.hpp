@@ -31,6 +31,11 @@
 namespace roa_controller_node
 {
 
+enum class CONTROL_MODE{
+  RT_CONTROL = 0,
+  DEBUG = 1
+};
+
 class RoaControllerNode : public rclcpp_lifecycle::LifecycleNode
 {
 public:
@@ -70,6 +75,10 @@ private:
   bool compute_rt_ok(const rclcpp::Time& tnow) const;
 
 private:
+
+  bool is_realtime_control_mode_ = false;
+  CONTROL_MODE control_mode_;
+
   using CallbackReturn =
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 

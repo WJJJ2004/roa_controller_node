@@ -1,5 +1,8 @@
 roa_controller_node:
   ros__parameters:
+    # 반드시 launch 파일에서 오버라이딩 확인할 것 !!
+    REALTIME_CONTROL_MODE: false
+
     hw_rate_hz: 100.0
     policy_rate_hz: 50.0
     status_rate_hz: 10.0

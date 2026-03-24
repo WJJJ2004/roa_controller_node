@@ -14,11 +14,11 @@ def generate_launch_description():
             executable="roa_controller_node",
             name="roa_controller_node",
             output="screen",
-            parameters=[
-                params,
-                {"REALTIME_CONTROL_MODE": True},
-            ],
-            arguments=["--ros-args", "--log-level", "warn"],
+						parameters=[
+														params,
+														{"REALTIME_CONTROL_MODE": True},
+												],
+            arguments=["--ros-args", "--log-level", "info"],
         ),
         # Node(
         #     package=pkg,
