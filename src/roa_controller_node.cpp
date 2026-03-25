@@ -495,6 +495,9 @@ void RoaControllerNode::setupRosInterfaces()
   rclcpp::QoS cmd_qos(rclcpp::KeepLast(1));
   cmd_qos.reliable();
 
+  rclcpp::QoS motor_status_qos(rclcpp::KeepLast(1));
+  motor_status_qos.best_effort();
+
   // Publishers
   rsu_target_pub_ = create_publisher<roa_interfaces::msg::RsuTarget>(topic_rsu_target_, rsu_qos);
   motor_packit_pub_ = create_publisher<roa_interfaces::msg::MotorCommandArray>(topic_motor_command_, cmd_qos);
@@ -512,7 +515,7 @@ void RoaControllerNode::setupRosInterfaces()
   rsu_solution_sub_ = create_subscription<roa_interfaces::msg::RsuSolution>(
     topic_rsu_solution_, rsu_qos, std::bind(&RoaControllerNode::onRsuSolution, this, std::placeholders::_1));
   motor_state_sub_  = create_subscription<roa_interfaces::msg::MotorStateArray>(
-    topic_motor_state_, cmd_qos, std::bind(&RoaControllerNode::onMotorStatus, this, std::placeholders::_1));
+    topic_motor_state_, motor_status_qos, std::bind(&RoaControllerNode::onMotorStatus, this, std::placeholders::_1));
   rsu_state_sub_ = create_subscription<roa_interfaces::msg::RsuStateArray>(
     topic_rsu_status_, rsu_qos, std::bind(&RoaControllerNode::onRsuStatus, this, std::placeholders::_1));
 }
