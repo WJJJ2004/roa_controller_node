@@ -28,6 +28,16 @@
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <rclcpp_lifecycle/lifecycle_publisher.hpp>
 
+// 서있는 자세를 위한 보행 초기 자세 -> offset pose 
+#define HIP_INIT_POS 0.418879f
+#define KNEE_INIT_POS 0.698131f
+#define ANKLE_INIT_POS 0.458105f
+
+// 추론 모델의 상대각도 기준점 -> default anlge
+#define HIP_PITCH_DEF 0.349066f  // 20 degrees 
+#define KNEE_PITCH_DEF 0.872665f // 50 degrees
+#define ANKLE_PITCH_DEF 0.523599f // 30 degrees
+
 namespace roa_controller_node
 {
 
@@ -42,6 +52,11 @@ public:
   explicit RoaControllerNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
 
 private:
+  // fixed dimensions
+  static constexpr int kObsDim = roa::policy::iface::Policy12DofV1::kObsDim;
+  static constexpr int kActDim = roa::policy::iface::Policy12DofV1::kActDim;
+  static constexpr int kDof    = roa::policy::iface::Policy12DofV1::kDof;
+
   enum ControllerErrorCode : uint32_t
   {
     ERR_NONE              = 0u,
@@ -75,7 +90,54 @@ private:
   bool compute_rt_ok(const rclcpp::Time& tnow) const;
 
 private:
+  PacketManager::Command12Dof
+  setInitPose() 
+  {  
+    PacketManager::Command12Dof init_pos_{};
 
+    init_pos_.left_hip_pitch   = -HIP_INIT_POS;
+    init_pos_.left_hip_roll    = 0.0f;
+    init_pos_.left_hip_yaw     = 0.0f;
+    init_pos_.left_knee_pitch  =  KNEE_INIT_POS;
+
+    init_pos_.right_hip_pitch  =  HIP_INIT_POS;
+    init_pos_.right_hip_roll   = 0.0f;
+    init_pos_.right_hip_yaw    = 0.0f;
+    init_pos_.right_knee_pitch = -KNEE_INIT_POS;
+
+    init_pos_.left_rsu_upper   = -ANKLE_INIT_POS;
+    init_pos_.left_rsu_lower   =  ANKLE_INIT_POS;
+    init_pos_.right_rsu_upper  =  ANKLE_INIT_POS;
+    init_pos_.right_rsu_lower  = -ANKLE_INIT_POS;
+
+    return init_pos_;
+  }
+
+  static std::array<float, kActDim>
+  make_default_angles()
+  {
+    using P = roa::policy::iface::Policy12DofV1;
+    std::array<float, P::kActDim> q{};
+
+    q[P::L_HIP_PITCH]    = -HIP_PITCH_DEF;
+    q[P::R_HIP_PITCH]    =  HIP_PITCH_DEF;
+    q[P::L_HIP_ROLL]     =  0.00f;
+    q[P::R_HIP_ROLL]     =  0.00f;
+    q[P::L_HIP_YAW]      =  0.00f;
+    q[P::R_HIP_YAW]      =  0.00f;
+    q[P::L_KNEE_PITCH]   =  KNEE_PITCH_DEF;
+    q[P::R_KNEE_PITCH]   = -KNEE_PITCH_DEF;
+    q[P::L_ANKLE_PITCH]  = -ANKLE_PITCH_DEF;
+    q[P::R_ANKLE_PITCH]  =  ANKLE_PITCH_DEF;
+    q[P::L_ANKLE_ROLL]   =  0.00f;
+    q[P::R_ANKLE_ROLL]   =  0.00f;
+
+    return q;
+  }
+  const std::array<float, kActDim> default_angles_ = make_default_angles();
+  const float action_scale_ = 0.5;
+  
+  bool is_activate{false};
   bool is_realtime_control_mode_ = false;
   CONTROL_MODE control_mode_;
 
@@ -131,19 +193,14 @@ private:
   roa::policy::PolicyDriver driver_;
   bool policy_loaded_{false};
 
-  // fixed dimensions
-  static constexpr int kObsDim = roa::policy::iface::Policy12DofV1::kObsDim;
-  static constexpr int kActDim = roa::policy::iface::Policy12DofV1::kActDim;
-  static constexpr int kDof    = roa::policy::iface::Policy12DofV1::kDof;
-
   // buffers
   std::array<float, kObsDim> obs_buffer_{};
   std::array<float, kActDim> act_buffer_{};
   std::array<float, kDof> last_action_{};
 
-  // structured obs/act
+  // // structured obs/act
   roa::policy::iface::Policy12DofV1::Obs obs_{};
-  roa::policy::iface::Policy12DofV1::Act act_{};
+  // roa::policy::iface::Policy12DofV1::Act act_{};
 
 
   bool init_policy();
@@ -161,7 +218,7 @@ private:
   // parameters
   double hw_rate_hz_{100.0};
   double policy_rate_hz_{50.0};
-  double status_rate_hz_{10.0};                 // 추가
+  double status_rate_hz_{10.0};
 
   double rsu_timeout_ms_{50.0};
   double cmd_timeout_ms_{50.0};
@@ -192,29 +249,6 @@ private:
   rclcpp::Duration policy_cmd_timeout_{0, 0};
 
   uint32_t rsu_seq_{0};
-
-  static std::array<float, roa::policy::iface::Policy12DofV1::kDof>
-  make_default_angles()
-  {
-    using P = roa::policy::iface::Policy12DofV1;
-    std::array<float, P::kDof> q{};
-
-    q[P::L_HIP_PITCH]    = -0.16f;
-    q[P::R_HIP_PITCH]    = -0.16f;
-    q[P::L_HIP_ROLL]     =  0.00f;
-    q[P::R_HIP_ROLL]     =  0.00f;
-    q[P::L_HIP_YAW]      =  0.00f;
-    q[P::R_HIP_YAW]      =  0.00f;
-    q[P::L_KNEE_PITCH]   =  0.32f;
-    q[P::R_KNEE_PITCH]   =  0.32f;
-    q[P::L_ANKLE_PITCH]  = -0.16f;
-    q[P::R_ANKLE_PITCH]  = -0.16f;
-    q[P::L_ANKLE_ROLL]   =  0.00f;
-    q[P::R_ANKLE_ROLL]   =  0.00f;
-
-    return q;
-  }
-  const std::array<float, kDof> default_angles_ = make_default_angles();
 };
 
 }  // namespace roa_controller_node
