@@ -18,7 +18,7 @@ def generate_launch_description():
                 params,
                 {"REALTIME_CONTROL_MODE": True},
             ],
-            arguments=["--ros-args", "--log-level", "warn"],
+            arguments=["--ros-args", "--log-level", "info"],
         ),
         # Node(
         #     package=pkg,

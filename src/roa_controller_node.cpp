@@ -1,3 +1,7 @@
+// TODO 
+// * policy action scale ? Raw Action 처리 방식 ? 
+// * action_to_q_target
+// * handle first lastaciton obs
 #include "node/roa_controller_node.hpp"
 
 #include <algorithm>
@@ -18,6 +22,8 @@ RoaControllerNode::RoaControllerNode(const rclcpp::NodeOptions& options)
 RoaControllerNode::CallbackReturn
 RoaControllerNode::on_configure(const rclcpp_lifecycle::State &)
 {
+  is_activate = false;
+  motor_cmd = setInitPose();
   RCLCPP_INFO(get_logger(), "[Lifecycle] on_configure()");
 
   declareAndLoadParams();
@@ -93,6 +99,7 @@ RoaControllerNode::on_configure(const rclcpp_lifecycle::State &)
 RoaControllerNode::CallbackReturn
 RoaControllerNode::on_activate(const rclcpp_lifecycle::State &)
 {
+  is_activate = true;
   RCLCPP_INFO(get_logger(), "[Lifecycle] on_activate()");
 
   if (!policy_loaded_) {
@@ -124,6 +131,7 @@ RoaControllerNode::on_activate(const rclcpp_lifecycle::State &)
 RoaControllerNode::CallbackReturn
 RoaControllerNode::on_deactivate(const rclcpp_lifecycle::State &)
 {
+  is_activate = false;
   RCLCPP_WARN(get_logger(), "[Lifecycle] on_deactivate()");
 
   if (hw_timer_) {
@@ -149,6 +157,7 @@ RoaControllerNode::on_deactivate(const rclcpp_lifecycle::State &)
 RoaControllerNode::CallbackReturn
 RoaControllerNode::on_cleanup(const rclcpp_lifecycle::State &)
 {
+  is_activate = false;
   RCLCPP_INFO(get_logger(), "[Lifecycle] on_cleanup()");
 
   if (hw_timer_) {
@@ -194,7 +203,7 @@ void RoaControllerNode::declareAndLoadParams()
 {
   // control mode 
   if (!this->has_parameter("REALTIME_CONTROL_MODE")) {
-    this->declare_parameter<bool>("declare_parameter", is_realtime_control_mode_);
+    this->declare_parameter<bool>("REALTIME_CONTROL_MODE", is_realtime_control_mode_);
   }
   // rates
   if (!this->has_parameter("hw_rate_hz")) {
@@ -266,12 +275,15 @@ void RoaControllerNode::declareAndLoadParams()
     this->declare_parameter<std::string>("topics.rsu_state_sub", topic_rsu_status_);
   }
 
+  is_realtime_control_mode_ = this->get_parameter("REALTIME_CONTROL_MODE").as_bool();
   if (is_realtime_control_mode_) {
     control_mode_ = CONTROL_MODE::RT_CONTROL;
   }
   else {
     control_mode_ = CONTROL_MODE::DEBUG;
   }
+
+  RCLCPP_INFO(get_logger(), "Control mode: %s", (control_mode_ == CONTROL_MODE::RT_CONTROL) ? "REALTIME_CONTROL_MODE" : "DEBUG_MODE");
     
   // load rates
   hw_rate_hz_ = this->get_parameter("hw_rate_hz").as_double();
@@ -541,7 +553,6 @@ void RoaControllerNode::setupTimers()
   // inactive/configured 상태에서는 timer stop
   hw_timer_->cancel();
   policy_timer_->cancel();
-  // status_timer_->cancel(); > 상위 FSM 쪽 수신 요청 응답
 }
 
 void RoaControllerNode::onImu(sensor_msgs::msg::Imu::SharedPtr msg)
@@ -629,24 +640,28 @@ void RoaControllerNode::InferenceLoop()
     last_action_[i] = act_buffer_[i];
   }
 
+  using P = roa::policy::iface::Policy12DofV1;
+  auto q_target = P::action_to_q_target(
+    act_buffer_, default_angles_, action_scale_);
+
   {
     std::lock_guard<std::mutex> lk(cmd_m_);
 
-    motor_cmd.left_hip_pitch   = act_buffer_[roa::policy::iface::Policy12DofV1::L_HIP_PITCH];
-    motor_cmd.right_hip_pitch  = act_buffer_[roa::policy::iface::Policy12DofV1::R_HIP_PITCH];
-    motor_cmd.left_hip_roll    = act_buffer_[roa::policy::iface::Policy12DofV1::L_HIP_ROLL];
-    motor_cmd.right_hip_roll   = act_buffer_[roa::policy::iface::Policy12DofV1::R_HIP_ROLL];
-    motor_cmd.left_hip_yaw     = act_buffer_[roa::policy::iface::Policy12DofV1::L_HIP_YAW];
-    motor_cmd.right_hip_yaw    = act_buffer_[roa::policy::iface::Policy12DofV1::R_HIP_YAW];
-    motor_cmd.left_knee_pitch  = act_buffer_[roa::policy::iface::Policy12DofV1::L_KNEE_PITCH];
-    motor_cmd.right_knee_pitch = act_buffer_[roa::policy::iface::Policy12DofV1::R_KNEE_PITCH];
+    motor_cmd.left_hip_pitch   = q_target[P::L_HIP_PITCH];
+    motor_cmd.right_hip_pitch  = q_target[P::R_HIP_PITCH];
+    motor_cmd.left_hip_roll    = q_target[P::L_HIP_ROLL];
+    motor_cmd.right_hip_roll   = q_target[P::R_HIP_ROLL];
+    motor_cmd.left_hip_yaw     = q_target[P::L_HIP_YAW];
+    motor_cmd.right_hip_yaw    = q_target[P::R_HIP_YAW];
+    motor_cmd.left_knee_pitch  = q_target[P::L_KNEE_PITCH];
+    motor_cmd.right_knee_pitch = q_target[P::R_KNEE_PITCH];
   }
 
   publish_rsu_target(
-    act_buffer_[roa::policy::iface::Policy12DofV1::L_ANKLE_ROLL],
-    act_buffer_[roa::policy::iface::Policy12DofV1::L_ANKLE_PITCH],
-    act_buffer_[roa::policy::iface::Policy12DofV1::R_ANKLE_ROLL],
-    act_buffer_[roa::policy::iface::Policy12DofV1::R_ANKLE_PITCH]
+    q_target[P::L_ANKLE_ROLL],
+    q_target[P::L_ANKLE_PITCH],
+    q_target[P::R_ANKLE_ROLL],
+    q_target[P::R_ANKLE_PITCH]
   );
 }
 
@@ -658,35 +673,14 @@ void RoaControllerNode::ControlLoop()
 
   const auto tnow = now();
 
-  // 1) latest non-RSU command snapshot
+  // latest non-RSU command snapshot
   PacketManager::Command12Dof cmd;
   {
     std::lock_guard<std::mutex> lk(cmd_m_);
     cmd = motor_cmd;
   }
 
-  // 2) policy freshness check
-  const bool policy_cmd_ok =
-    (last_policy_update_time_.nanoseconds() > 0) &&
-    ((tnow - last_policy_update_time_) < policy_cmd_timeout_);
-
-  if (!policy_cmd_ok) {
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 2000,
-      "Policy command stale. Holding/zeroing non-RSU joints.");
-
-    // 초기 정책: stale면 non-RSU joint zero
-    cmd.left_hip_pitch   = 0.0f;
-    cmd.right_hip_pitch  = 0.0f;
-    cmd.left_hip_roll    = 0.0f;
-    cmd.right_hip_roll   = 0.0f;
-    cmd.left_hip_yaw     = 0.0f;
-    cmd.right_hip_yaw    = 0.0f;
-    cmd.left_knee_pitch  = 0.0f;
-    cmd.right_knee_pitch = 0.0f;
-  }
-
-  // 3) latest RSU solution check
+  // latest RSU solution check
   auto [rsu_msg, rsu_rx_time] = rsu_latch_.get();
 
   const bool rsu_ok =
@@ -717,61 +711,24 @@ void RoaControllerNode::ControlLoop()
       "RSU solution stale or infeasible. Holding previous safe RSU command.");
   }
 
-  // 4) stale / infeasible이면 hold
+  // stale / infeasible이면 hold
   cmd.left_rsu_upper  = last_safe_rsu_[0];
   cmd.left_rsu_lower  = last_safe_rsu_[1];
   cmd.right_rsu_upper = last_safe_rsu_[2];
   cmd.right_rsu_lower = last_safe_rsu_[3];
 
-  // 5) final sanitize
-  auto sanitize = [](float& v) {
-    if (!std::isfinite(v)) {
-      v = 0.0f;
-    }
-  };
-
-  sanitize(cmd.left_hip_pitch);
-  sanitize(cmd.right_hip_pitch);
-  sanitize(cmd.left_hip_roll);
-  sanitize(cmd.right_hip_roll);
-  sanitize(cmd.left_hip_yaw);
-  sanitize(cmd.right_hip_yaw);
-  sanitize(cmd.left_knee_pitch);
-  sanitize(cmd.right_knee_pitch);
-  sanitize(cmd.left_rsu_upper);
-  sanitize(cmd.left_rsu_lower);
-  sanitize(cmd.right_rsu_upper);
-  sanitize(cmd.right_rsu_lower);
-
   if (control_mode_ == CONTROL_MODE::RT_CONTROL) {
-    auto msg = PacketManager::build(cmd, this->now(), "hardware_interface");
+    auto msg = PacketManager::build(cmd, this->now(), "/CTRL/RT_CONTROL");
     motor_packit_pub_->publish(msg);
   }
   else {
-    // DEBUG mode: send initial position to hardware, print command for debugging
-    PacketManager::Command12Dof init_pos;
-    init_pos.left_hip_pitch   = -20.0f * M_PI / 180.0f;  // -20 degrees
-    init_pos.left_hip_roll    = 0.0f;
-    init_pos.left_hip_yaw     = 0.0f;
-    init_pos.left_knee_pitch  = 50.0f * M_PI / 180.0f;   // 50 degrees
-    
-    init_pos.right_hip_pitch  = 20.0f * M_PI / 180.0f;   // 20 degrees
-    init_pos.right_hip_roll   = 0.0f;
-    init_pos.right_hip_yaw    = 0.0f;
-    init_pos.right_knee_pitch = -50.0f * M_PI / 180.0f;  // -50 degrees
-    
-    init_pos.left_rsu_upper   = 30.0f * M_PI / 180.0f;   // 30 degrees
-    init_pos.left_rsu_lower   = -30.0f * M_PI / 180.0f;  // -30 degrees
-    init_pos.right_rsu_upper  = -30.0f * M_PI / 180.0f;  // -30 degrees
-    init_pos.right_rsu_lower  = 30.0f * M_PI / 180.0f;   // 30 degrees
-    
     // Send initial position to hardware
-    auto msg = PacketManager::build(init_pos, this->now(), "hardware_interface");
+    auto msg = PacketManager::build(setInitPose(), this->now(), "/CTRL/DEBUG_MODE");
     motor_packit_pub_->publish(msg);
 
     // Print computed command for debugging
-    RCLCPP_DEBUG(get_logger(), 
-      "[DEBUG] Policy Cmd - Hip: L(%.3f,%.3f) R(%.3f,%.3f) | "
+    RCLCPP_INFO(get_logger(), 
+      "[INFER] Policy Cmd - Hip: L(%.3f,%.3f) R(%.3f,%.3f) | "
       "Knee: L%.3f R%.3f | RSU: L(%.3f,%.3f) R(%.3f,%.3f)",
       cmd.left_hip_pitch, cmd.left_hip_roll,
       cmd.right_hip_pitch, cmd.right_hip_roll,
@@ -861,10 +818,16 @@ bool RoaControllerNode::compute_rt_ok(const rclcpp::Time& tnow) const
     std::isfinite(rsu_state_msg->q_dot.right_rsu_roll) &&
     std::isfinite(rsu_state_msg->q_dot.right_rsu_pitch);
 
-  const bool policy_ok =
-    (last_policy_update_time_.nanoseconds() > 0) &&
-    ((tnow - last_policy_update_time_) < policy_cmd_timeout_);
-
+    bool policy_ok = false;
+    if (is_activate) {
+      policy_ok =
+        (last_policy_update_time_.nanoseconds() > 0) &&
+        ((tnow - last_policy_update_time_) < policy_cmd_timeout_);
+    }
+    else
+    {
+      policy_ok = true; // 비활성 상태에서는 정책 신선도 체크 안함
+    }
   return imu_ok && motor_state_ok && rsu_state_ok && policy_ok;
 }
 
@@ -907,13 +870,14 @@ uint32_t RoaControllerNode::compute_controller_error_code(const rclcpp::Time& tn
     err |= ERR_RSU_STATE_STALE;
   }
 
-  const bool policy_ok =
-    (last_policy_update_time_.nanoseconds() > 0) &&
-    ((tnow - last_policy_update_time_) < policy_cmd_timeout_);
-  if (!policy_ok) {
-    err |= ERR_POLICY_STALE;
+  if (is_activate) {
+    const bool policy_ok =
+      (last_policy_update_time_.nanoseconds() > 0) &&
+      ((tnow - last_policy_update_time_) < policy_cmd_timeout_);
+    if (!policy_ok) {
+      err |= ERR_POLICY_STALE;
+    }
   }
-
   return err;
 }
 
