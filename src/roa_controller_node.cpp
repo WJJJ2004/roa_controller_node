@@ -1,6 +1,7 @@
 // TODO 
 // * policy action scale ? Raw Action 처리 방식 ? 
 // * action_to_q_target
+// * handle first lastaciton obs
 #include "node/roa_controller_node.hpp"
 
 #include <algorithm>
