@@ -1,7 +1,8 @@
 #pragma once
 #include <rclcpp/rclcpp.hpp>
 #include <iostream>
-
+#include <sstream>
+#include <iomanip>
 #include <sensor_msgs/msg/imu.hpp>
 #include <geometry_msgs/msg/vector3_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
@@ -28,10 +29,15 @@
 #include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <rclcpp_lifecycle/lifecycle_publisher.hpp>
 
-// 서있는 자세를 위한 보행 초기 자세 -> offset pose 
+// 서있는 자세를 위한 보행 초기 자세 -> 하드웨어 제어의 offset pose 
 #define HIP_INIT_POS 0.418879f
 #define KNEE_INIT_POS 0.698131f
 #define ANKLE_INIT_POS 0.458105f
+
+// 추론 모델 기준의 초기 자세 -> last action obs의 기준점 
+#define HIP_INIT_INF 0.418879f  // 24.0 degrees
+#define KNEE_INIT_INF 0.698132f // 40.0 degrees
+#define ANKLE_INIT_INF 0.567232f // 32.5 degrees
 
 // 추론 모델의 상대각도 기준점 -> default anlge
 #define HIP_PITCH_DEF 0.349066f  // 20 degrees 
@@ -40,7 +46,6 @@
 
 namespace roa_controller_node
 {
-
 enum class CONTROL_MODE{
   RT_CONTROL = 0,
   DEBUG = 1
@@ -134,6 +139,29 @@ private:
 
     return q;
   }
+
+  static std::array<float, kActDim>
+  initLastAction()
+  {
+    using P = roa::policy::iface::Policy12DofV1;
+    std::array<float, P::kActDim> q{};
+
+    q[P::L_HIP_PITCH]    = -HIP_INIT_INF;
+    q[P::R_HIP_PITCH]    =  HIP_INIT_INF;
+    q[P::L_HIP_ROLL]     =  0.00f;
+    q[P::R_HIP_ROLL]     =  0.00f;
+    q[P::L_HIP_YAW]      =  0.00f;
+    q[P::R_HIP_YAW]      =  0.00f;
+    q[P::L_KNEE_PITCH]   =  KNEE_INIT_INF;
+    q[P::R_KNEE_PITCH]   = -KNEE_INIT_INF;
+    q[P::L_ANKLE_PITCH]  = -ANKLE_INIT_INF;
+    q[P::R_ANKLE_PITCH]  =  ANKLE_INIT_INF;
+    q[P::L_ANKLE_ROLL]   =  0.00f;
+    q[P::R_ANKLE_ROLL]   =  0.00f;
+
+    return q;
+  }
+
   const std::array<float, kActDim> default_angles_ = make_default_angles();
   const float action_scale_ = 0.5;
   
@@ -208,6 +236,19 @@ private:
   // +++++++++++++ MOTOR CONTROL ++++++++++++
 
   PacketManager::Command12Dof motor_cmd{};
+  std::array<float, 4>
+  initLastSafeRsu()
+  {
+    std::array<float, 4> rsu{};
+
+    rsu[0] = -ANKLE_INIT_POS; // left upper
+    rsu[1] =  ANKLE_INIT_POS; // left lower
+    rsu[2] =  ANKLE_INIT_POS; // right upper
+    rsu[3] = -ANKLE_INIT_POS; // right lower
+
+    return rsu;
+  }
+
   std::array<float, 4> last_safe_rsu_{0.f, 0.f, 0.f, 0.f};
 
   // ++++++++++++++++++++++++++++++++++++++++
@@ -249,6 +290,14 @@ private:
   rclcpp::Duration policy_cmd_timeout_{0, 0};
 
   uint32_t rsu_seq_{0};
+
+  void printInferenceDebug(
+    const std::array<float, kActDim>& q_target) const;
+
+  void printControlDebug(
+    const PacketManager::Command12Dof& computed_cmd,
+    const PacketManager::Command12Dof& init_cmd,
+    bool rsu_ok) const;
 };
 
 }  // namespace roa_controller_node

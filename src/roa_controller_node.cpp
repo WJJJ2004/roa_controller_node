@@ -186,7 +186,7 @@ RoaControllerNode::on_cleanup(const rclcpp_lifecycle::State &)
 
   policy_loaded_ = false;
 
-  last_safe_rsu_ = {0.0f, 0.0f, 0.0f, 0.0f};
+  last_safe_rsu_ = initLastSafeRsu();
   rsu_seq_ = 0;
 
   return CallbackReturn::SUCCESS;
@@ -325,7 +325,8 @@ void RoaControllerNode::declareAndLoadParams()
 bool RoaControllerNode::init_policy()
 {
   roa::policy::Options opt{};
-  std::string model_path = roa::policy::iface::Policy12DofV1::default_model_path();
+  using P = roa::policy::iface::Policy12DofV1;
+  std::string model_path = P::default_model_path();
 
   if (!driver_.load(model_path, opt)) {
     RCLCPP_ERROR(get_logger(), "Failed to load policy: %s", model_path.c_str());
@@ -340,7 +341,11 @@ bool RoaControllerNode::init_policy()
     return false;
   }
 
-  last_action_.fill(0.0f);
+  last_action_ = P::q_target_to_action(
+    initLastAction(),
+    default_angles_,
+    action_scale_
+  );
   obs_buffer_.fill(0.0f);
   act_buffer_.fill(0.0f);
 
@@ -644,6 +649,10 @@ void RoaControllerNode::InferenceLoop()
   auto q_target = P::action_to_q_target(
     act_buffer_, default_angles_, action_scale_);
 
+  if (control_mode_ == CONTROL_MODE::DEBUG) {
+    printInferenceDebug(q_target);
+  }
+
   {
     std::lock_guard<std::mutex> lk(cmd_m_);
 
@@ -717,24 +726,18 @@ void RoaControllerNode::ControlLoop()
   cmd.right_rsu_upper = last_safe_rsu_[2];
   cmd.right_rsu_lower = last_safe_rsu_[3];
 
+
   if (control_mode_ == CONTROL_MODE::RT_CONTROL) {
     auto msg = PacketManager::build(cmd, this->now(), "/CTRL/RT_CONTROL");
     motor_packit_pub_->publish(msg);
   }
   else {
-    // Send initial position to hardware
-    auto msg = PacketManager::build(setInitPose(), this->now(), "/CTRL/DEBUG_MODE");
+    const auto init_cmd = setInitPose();
+
+    auto msg = PacketManager::build(init_cmd, this->now(), "/CTRL/DEBUG_MODE");
     motor_packit_pub_->publish(msg);
 
-    // Print computed command for debugging
-    RCLCPP_INFO(get_logger(), 
-      "[INFER] Policy Cmd - Hip: L(%.3f,%.3f) R(%.3f,%.3f) | "
-      "Knee: L%.3f R%.3f | RSU: L(%.3f,%.3f) R(%.3f,%.3f)",
-      cmd.left_hip_pitch, cmd.left_hip_roll,
-      cmd.right_hip_pitch, cmd.right_hip_roll,
-      cmd.left_knee_pitch, cmd.right_knee_pitch,
-      cmd.left_rsu_upper, cmd.left_rsu_lower,
-      cmd.right_rsu_upper, cmd.right_rsu_lower);
+    printControlDebug(cmd, init_cmd, rsu_ok);
   }
 }
 
@@ -881,6 +884,121 @@ uint32_t RoaControllerNode::compute_controller_error_code(const rclcpp::Time& tn
   return err;
 }
 
+void RoaControllerNode::printControlDebug(
+  const PacketManager::Command12Dof& computed_cmd,
+  const PacketManager::Command12Dof& init_cmd,
+  bool rsu_ok) const
+{
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(3);
+
+  oss << "\n[DEBUG][CONTROL]\n";
+  oss << " rsu_ok = " << (rsu_ok ? "true" : "false") << "\n";
+
+  oss << " init_pose      : "
+      << "LHP=" << init_cmd.left_hip_pitch
+      << ", LHR=" << init_cmd.left_hip_roll
+      << ", LHY=" << init_cmd.left_hip_yaw
+      << ", LKP=" << init_cmd.left_knee_pitch
+      << ", RHP=" << init_cmd.right_hip_pitch
+      << ", RHR=" << init_cmd.right_hip_roll
+      << ", RHY=" << init_cmd.right_hip_yaw
+      << ", RKP=" << init_cmd.right_knee_pitch
+      << ", LRU=" << init_cmd.left_rsu_upper
+      << ", LRL=" << init_cmd.left_rsu_lower
+      << ", RRU=" << init_cmd.right_rsu_upper
+      << ", RRL=" << init_cmd.right_rsu_lower
+      << "\n";
+
+  oss << " computed_cmd   : "
+      << "LHP=" << computed_cmd.left_hip_pitch
+      << ", LHR=" << computed_cmd.left_hip_roll
+      << ", LHY=" << computed_cmd.left_hip_yaw
+      << ", LKP=" << computed_cmd.left_knee_pitch
+      << ", RHP=" << computed_cmd.right_hip_pitch
+      << ", RHR=" << computed_cmd.right_hip_roll
+      << ", RHY=" << computed_cmd.right_hip_yaw
+      << ", RKP=" << computed_cmd.right_knee_pitch
+      << ", LRU=" << computed_cmd.left_rsu_upper
+      << ", LRL=" << computed_cmd.left_rsu_lower
+      << ", RRU=" << computed_cmd.right_rsu_upper
+      << ", RRL=" << computed_cmd.right_rsu_lower
+      << "\n";
+
+  oss << " delta(cmd - init): "
+      << "LHP=" << (computed_cmd.left_hip_pitch   - init_cmd.left_hip_pitch)
+      << ", LHR=" << (computed_cmd.left_hip_roll  - init_cmd.left_hip_roll)
+      << ", LHY=" << (computed_cmd.left_hip_yaw   - init_cmd.left_hip_yaw)
+      << ", LKP=" << (computed_cmd.left_knee_pitch - init_cmd.left_knee_pitch)
+      << ", RHP=" << (computed_cmd.right_hip_pitch - init_cmd.right_hip_pitch)
+      << ", RHR=" << (computed_cmd.right_hip_roll  - init_cmd.right_hip_roll)
+      << ", RHY=" << (computed_cmd.right_hip_yaw   - init_cmd.right_hip_yaw)
+      << ", RKP=" << (computed_cmd.right_knee_pitch - init_cmd.right_knee_pitch)
+      << ", LRU=" << (computed_cmd.left_rsu_upper  - init_cmd.left_rsu_upper)
+      << ", LRL=" << (computed_cmd.left_rsu_lower  - init_cmd.left_rsu_lower)
+      << ", RRU=" << (computed_cmd.right_rsu_upper - init_cmd.right_rsu_upper)
+      << ", RRL=" << (computed_cmd.right_rsu_lower - init_cmd.right_rsu_lower);
+
+  RCLCPP_INFO(get_logger(), "%s", oss.str().c_str());
+}
+
+void RoaControllerNode::printInferenceDebug(
+  const std::array<float, kActDim>& q_target) const
+{
+  auto minmax_act = std::minmax_element(act_buffer_.begin(), act_buffer_.end());
+  auto minmax_q   = std::minmax_element(q_target.begin(), q_target.end());
+
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(3);
+
+  oss << "\n[DEBUG][INFER]\n";
+  oss << " cmd        = ["
+      << obs_.cmd[0] << ", " << obs_.cmd[1] << ", " << obs_.cmd[2] << "]\n";
+  oss << " imu        = ["
+      << obs_.imu_omega_body[0] << ", "
+      << obs_.imu_omega_body[1] << ", "
+      << obs_.imu_omega_body[2] << "]\n";
+
+  oss << " q_rel      = [";
+  for (int i = 0; i < kDof; ++i) {
+    oss << obs_.q_rel[i];
+    if (i + 1 != kDof) oss << ", ";
+  }
+  oss << "]\n";
+
+  oss << " qd_rel     = [";
+  for (int i = 0; i < kDof; ++i) {
+    oss << obs_.qd_rel[i];
+    if (i + 1 != kDof) oss << ", ";
+  }
+  oss << "]\n";
+
+  oss << " last_action= [";
+  for (int i = 0; i < kDof; ++i) {
+    oss << obs_.last_action[i];
+    if (i + 1 != kDof) oss << ", ";
+  }
+  oss << "]\n";
+
+  oss << " raw_action = [";
+  for (int i = 0; i < kActDim; ++i) {
+    oss << act_buffer_[i];
+    if (i + 1 != kActDim) oss << ", ";
+  }
+  oss << "]\n";
+
+  oss << " q_target   = [";
+  for (int i = 0; i < kActDim; ++i) {
+    oss << q_target[i];
+    if (i + 1 != kActDim) oss << ", ";
+  }
+  oss << "]\n";
+
+  oss << " action[min,max] = [" << *minmax_act.first << ", " << *minmax_act.second << "]\n";
+  oss << " target[min,max] = [" << *minmax_q.first   << ", " << *minmax_q.second   << "]";
+
+  RCLCPP_INFO(get_logger(), "%s", oss.str().c_str());
+}
 
 }  // namespace roa_controller_node
 
