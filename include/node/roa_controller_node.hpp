@@ -62,6 +62,10 @@ private:
   static constexpr int kActDim = roa::policy::iface::Policy12DofV1::kActDim;
   static constexpr int kDof    = roa::policy::iface::Policy12DofV1::kDof;
 
+  // Inference buffers
+  std::array<float, kDof> q_cur{};
+  std::array<float, kDof> qd_cur{};
+
   enum ControllerErrorCode : uint32_t
   {
     ERR_NONE              = 0u,
@@ -146,18 +150,22 @@ private:
     using P = roa::policy::iface::Policy12DofV1;
     std::array<float, P::kActDim> q{};
 
-    q[P::L_HIP_PITCH]    = -HIP_INIT_INF;
-    q[P::R_HIP_PITCH]    =  HIP_INIT_INF;
-    q[P::L_HIP_ROLL]     =  0.00f;
-    q[P::R_HIP_ROLL]     =  0.00f;
-    q[P::L_HIP_YAW]      =  0.00f;
-    q[P::R_HIP_YAW]      =  0.00f;
-    q[P::L_KNEE_PITCH]   =  KNEE_INIT_INF;
-    q[P::R_KNEE_PITCH]   = -KNEE_INIT_INF;
-    q[P::L_ANKLE_PITCH]  = -ANKLE_INIT_INF;
-    q[P::R_ANKLE_PITCH]  =  ANKLE_INIT_INF;
-    q[P::L_ANKLE_ROLL]   =  0.00f;
-    q[P::R_ANKLE_ROLL]   =  0.00f;
+    // TODO 추론 테스트
+    q.fill(0.0f);
+  
+    
+    // q[P::L_HIP_PITCH]    = -HIP_INIT_INF;
+    // q[P::R_HIP_PITCH]    =  HIP_INIT_INF;
+    // q[P::L_HIP_ROLL]     =  0.00f;
+    // q[P::R_HIP_ROLL]     =  0.00f;
+    // q[P::L_HIP_YAW]      =  0.00f;
+    // q[P::R_HIP_YAW]      =  0.00f;
+    // q[P::L_KNEE_PITCH]   =  KNEE_INIT_INF;
+    // q[P::R_KNEE_PITCH]   = -KNEE_INIT_INF;
+    // q[P::L_ANKLE_PITCH]  = -ANKLE_INIT_INF;
+    // q[P::R_ANKLE_PITCH]  =  ANKLE_INIT_INF;
+    // q[P::L_ANKLE_ROLL]   =  0.00f;
+    // q[P::R_ANKLE_ROLL]   =  0.00f;
 
     return q;
   }

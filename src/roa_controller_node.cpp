@@ -1,7 +1,30 @@
 // TODO 
-// * policy action scale ? Raw Action 처리 방식 ? 
-// * action_to_q_target
-// * handle first lastaciton obs
+// * handle first last aciton obs
+
+
+/*
+
+ros2 bag record \
+  /hardware_interface/state \
+  /hardware_interface/command \
+  /imu/data \
+  /rsu/state \
+  /rsu/solution \
+  /rsu/target \
+  /controller/status \
+  /walk_initialized
+
+
+ros2 bag record -o rl_debug_run_01 \
+  /hardware_interface/state \
+  /hardware_interface/command \
+  /imu/data \
+  /rsu/state \
+  /rsu/solution \
+  /rsu/target \
+  /controller/status \
+  /walk_initialized
+*/
 #include "node/roa_controller_node.hpp"
 
 #include <algorithm>
@@ -35,7 +58,7 @@ RoaControllerNode::on_configure(const rclcpp_lifecycle::State &)
   // last_hw_cmd_.data.resize(static_cast<size_t>(std::max(0, walk_len_)), 0.0f);
 
   // 내부 상태 초기화
-  last_safe_rsu_ = {0.0f, 0.0f, 0.0f, 0.0f};
+  last_safe_rsu_ = initLastSafeRsu();
   rsu_seq_ = 0;
   policy_loaded_ = false;
   last_policy_update_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
@@ -341,11 +364,12 @@ bool RoaControllerNode::init_policy()
     return false;
   }
 
-  last_action_ = P::q_target_to_action(
-    initLastAction(),
-    default_angles_,
-    action_scale_
-  );
+  // last_action_ = P::q_target_to_action(
+  //   initLastAction(),
+  //   default_angles_,
+  //   action_scale_
+  // );
+  last_action_.fill(0.0f);
   obs_buffer_.fill(0.0f);
   act_buffer_.fill(0.0f);
 
@@ -379,6 +403,9 @@ bool RoaControllerNode::isFreshStamp(
 
 bool RoaControllerNode::build_observation(const rclcpp::Time& tnow)
 {
+
+  using P = roa::policy::iface::Policy12DofV1;
+
   // 1) cmd
   auto [cmd_msg, cmd_rx_time] = cmd_latch_.get();
   const bool cmd_ok = (cmd_msg != nullptr) && isFreshRx(tnow, cmd_rx_time, cmd_timeout_);
@@ -386,7 +413,9 @@ bool RoaControllerNode::build_observation(const rclcpp::Time& tnow)
     obs_.cmd[0] = static_cast<float>(cmd_msg->linear.x);
     obs_.cmd[1] = static_cast<float>(cmd_msg->linear.y);
     obs_.cmd[2] = static_cast<float>(cmd_msg->angular.z);
-  } else {
+  } 
+  else {
+    // TODO ONLY FOR DEBUG !! SHOULD BE REMOVED OR REPLACED WITH SAFETY BEHAVIOR (E.G. HOLD LAST CMD OR ZERO CMD)
     obs_.cmd[0] = 0.0f;
     obs_.cmd[1] = 0.0f;
     obs_.cmd[2] = 0.0f;
@@ -403,13 +432,14 @@ bool RoaControllerNode::build_observation(const rclcpp::Time& tnow)
 
   if (!imu_ok) {
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-      "IMU data stale or invalid. Observation build failed.");
-    return false;
+      "[BuildObs] IMU data stale or invalid. Skiiping IMU update in observation.");
+    // return false;
   }
-
-  obs_.imu_omega_body[0] = static_cast<float>(imu_msg->angular_velocity.x);
-  obs_.imu_omega_body[1] = static_cast<float>(imu_msg->angular_velocity.y);
-  obs_.imu_omega_body[2] = static_cast<float>(imu_msg->angular_velocity.z);
+  else {
+    obs_.imu_omega_body[0] = static_cast<float>(imu_msg->angular_velocity.x);
+    obs_.imu_omega_body[1] = static_cast<float>(imu_msg->angular_velocity.y);
+    obs_.imu_omega_body[2] = static_cast<float>(imu_msg->angular_velocity.z);
+  }
 
   // 3) last_action
   for (int i = 0; i < kDof; ++i) {
@@ -424,18 +454,37 @@ bool RoaControllerNode::build_observation(const rclcpp::Time& tnow)
 
   if (!motor_state_ok) {
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-      "MotorState stale or invalid. Observation build failed.");
-    return false;
+      "[BuildObs] MotorState stale or invalid. Skipping motor state update in observation.");
+    // return false;
   }
+  else {
+    PacketManager::HardwareState hw{};
+    std::string hw_error;
+    if (!PacketManager::decode_motor_state(*motor_state_msg, hw, &hw_error)) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "[BuildObs] MotorState decode failed: %s", hw_error.c_str());
+      return false;
+    }
 
-  PacketManager::HardwareState hw{};
-  std::string hw_error;
-  if (!PacketManager::decode_motor_state(*motor_state_msg, hw, &hw_error)) {
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-      "MotorState decode failed: %s", hw_error.c_str());
-    return false;
+    q_cur[P::L_HIP_PITCH]   = hw.left_hip_pitch.position;
+    q_cur[P::R_HIP_PITCH]   = hw.right_hip_pitch.position;
+    q_cur[P::L_HIP_ROLL]    = hw.left_hip_roll.position;
+    q_cur[P::R_HIP_ROLL]    = hw.right_hip_roll.position;
+    q_cur[P::L_HIP_YAW]     = hw.left_hip_yaw.position;
+    q_cur[P::R_HIP_YAW]     = hw.right_hip_yaw.position;
+    q_cur[P::L_KNEE_PITCH]  = hw.left_knee_pitch.position;
+    q_cur[P::R_KNEE_PITCH]  = hw.right_knee_pitch.position;
+
+    qd_cur[P::L_HIP_PITCH]  = hw.left_hip_pitch.velocity;
+    qd_cur[P::R_HIP_PITCH]  = hw.right_hip_pitch.velocity;
+    qd_cur[P::L_HIP_ROLL]   = hw.left_hip_roll.velocity;
+    qd_cur[P::R_HIP_ROLL]   = hw.right_hip_roll.velocity;
+    qd_cur[P::L_HIP_YAW]    = hw.left_hip_yaw.velocity;
+    qd_cur[P::R_HIP_YAW]    = hw.right_hip_yaw.velocity;
+    qd_cur[P::L_KNEE_PITCH] = hw.left_knee_pitch.velocity;
+    qd_cur[P::R_KNEE_PITCH] = hw.right_knee_pitch.velocity;
+  
   }
-
   // 5) virtual RSU state
   auto [rsu_state_msg, rsu_state_rx_time] = rsu_state_latch_.get();
   const bool rsu_state_ok =
@@ -453,43 +502,54 @@ bool RoaControllerNode::build_observation(const rclcpp::Time& tnow)
 
   if (!rsu_state_ok) {
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-      "RSU state stale or invalid. Observation build failed.");
-    return false;
+      "[BuildObs] RSU state stale or invalid. Skipping RSU update in observation.");
+    // return false;
+  }
+  else {
+    q_cur[P::L_ANKLE_PITCH]  = rsu_state_msg->q.left_rsu_pitch;
+    q_cur[P::R_ANKLE_PITCH]  = rsu_state_msg->q.right_rsu_pitch;
+    q_cur[P::L_ANKLE_ROLL]   = rsu_state_msg->q.left_rsu_roll;
+    q_cur[P::R_ANKLE_ROLL]   = rsu_state_msg->q.right_rsu_roll;
+
+    qd_cur[P::L_ANKLE_PITCH] = rsu_state_msg->q_dot.left_rsu_pitch;
+    qd_cur[P::R_ANKLE_PITCH] = rsu_state_msg->q_dot.right_rsu_pitch;
+    qd_cur[P::L_ANKLE_ROLL]  = rsu_state_msg->q_dot.left_rsu_roll;
+    qd_cur[P::R_ANKLE_ROLL]  = rsu_state_msg->q_dot.right_rsu_roll;
   }
 
-  using P = roa::policy::iface::Policy12DofV1;
-  std::array<float, kDof> q_cur{};
-  std::array<float, kDof> qd_cur{};
+  // using P = roa::policy::iface::Policy12DofV1;
+  // if (motor_state_ok) {
+  //   // real encoder state for non-ankle joints
+  //   q_cur[P::L_HIP_PITCH]   = hw.left_hip_pitch.position;
+  //   q_cur[P::R_HIP_PITCH]   = hw.right_hip_pitch.position;
+  //   q_cur[P::L_HIP_ROLL]    = hw.left_hip_roll.position;
+  //   q_cur[P::R_HIP_ROLL]    = hw.right_hip_roll.position;
+  //   q_cur[P::L_HIP_YAW]     = hw.left_hip_yaw.position;
+  //   q_cur[P::R_HIP_YAW]     = hw.right_hip_yaw.position;
+  //   q_cur[P::L_KNEE_PITCH]  = hw.left_knee_pitch.position;
+  //   q_cur[P::R_KNEE_PITCH]  = hw.right_knee_pitch.position;
 
-  // real encoder state for non-ankle joints
-  q_cur[P::L_HIP_PITCH]   = hw.left_hip_pitch.position;
-  q_cur[P::R_HIP_PITCH]   = hw.right_hip_pitch.position;
-  q_cur[P::L_HIP_ROLL]    = hw.left_hip_roll.position;
-  q_cur[P::R_HIP_ROLL]    = hw.right_hip_roll.position;
-  q_cur[P::L_HIP_YAW]     = hw.left_hip_yaw.position;
-  q_cur[P::R_HIP_YAW]     = hw.right_hip_yaw.position;
-  q_cur[P::L_KNEE_PITCH]  = hw.left_knee_pitch.position;
-  q_cur[P::R_KNEE_PITCH]  = hw.right_knee_pitch.position;
+  //   qd_cur[P::L_HIP_PITCH]  = hw.left_hip_pitch.velocity;
+  //   qd_cur[P::R_HIP_PITCH]  = hw.right_hip_pitch.velocity;
+  //   qd_cur[P::L_HIP_ROLL]   = hw.left_hip_roll.velocity;
+  //   qd_cur[P::R_HIP_ROLL]   = hw.right_hip_roll.velocity;
+  //   qd_cur[P::L_HIP_YAW]    = hw.left_hip_yaw.velocity;
+  //   qd_cur[P::R_HIP_YAW]    = hw.right_hip_yaw.velocity;
+  //   qd_cur[P::L_KNEE_PITCH] = hw.left_knee_pitch.velocity;
+  //   qd_cur[P::R_KNEE_PITCH] = hw.right_knee_pitch.velocity;
+  // }
+  // // virtual ankle state for inference
+  // if (rsu_state_ok) {
+  //   q_cur[P::L_ANKLE_PITCH]  = rsu_state_msg->q.left_rsu_pitch;
+  //   q_cur[P::R_ANKLE_PITCH]  = rsu_state_msg->q.right_rsu_pitch;
+  //   q_cur[P::L_ANKLE_ROLL]   = rsu_state_msg->q.left_rsu_roll;
+  //   q_cur[P::R_ANKLE_ROLL]   = rsu_state_msg->q.right_rsu_roll;
 
-  qd_cur[P::L_HIP_PITCH]  = hw.left_hip_pitch.velocity;
-  qd_cur[P::R_HIP_PITCH]  = hw.right_hip_pitch.velocity;
-  qd_cur[P::L_HIP_ROLL]   = hw.left_hip_roll.velocity;
-  qd_cur[P::R_HIP_ROLL]   = hw.right_hip_roll.velocity;
-  qd_cur[P::L_HIP_YAW]    = hw.left_hip_yaw.velocity;
-  qd_cur[P::R_HIP_YAW]    = hw.right_hip_yaw.velocity;
-  qd_cur[P::L_KNEE_PITCH] = hw.left_knee_pitch.velocity;
-  qd_cur[P::R_KNEE_PITCH] = hw.right_knee_pitch.velocity;
-
-  // virtual ankle state for inference
-  q_cur[P::L_ANKLE_PITCH]  = rsu_state_msg->q.left_rsu_pitch;
-  q_cur[P::R_ANKLE_PITCH]  = rsu_state_msg->q.right_rsu_pitch;
-  q_cur[P::L_ANKLE_ROLL]   = rsu_state_msg->q.left_rsu_roll;
-  q_cur[P::R_ANKLE_ROLL]   = rsu_state_msg->q.right_rsu_roll;
-
-  qd_cur[P::L_ANKLE_PITCH] = rsu_state_msg->q_dot.left_rsu_pitch;
-  qd_cur[P::R_ANKLE_PITCH] = rsu_state_msg->q_dot.right_rsu_pitch;
-  qd_cur[P::L_ANKLE_ROLL]  = rsu_state_msg->q_dot.left_rsu_roll;
-  qd_cur[P::R_ANKLE_ROLL]  = rsu_state_msg->q_dot.right_rsu_roll;
+  //   qd_cur[P::L_ANKLE_PITCH] = rsu_state_msg->q_dot.left_rsu_pitch;
+  //   qd_cur[P::R_ANKLE_PITCH] = rsu_state_msg->q_dot.right_rsu_pitch;
+  //   qd_cur[P::L_ANKLE_ROLL]  = rsu_state_msg->q_dot.left_rsu_roll;
+  //   qd_cur[P::R_ANKLE_ROLL]  = rsu_state_msg->q_dot.right_rsu_roll;
+  // }
 
   // q_rel / qd_rel
   for (int i = 0; i < kDof; ++i) {
@@ -615,7 +675,7 @@ void RoaControllerNode::InferenceLoop()
   }
 
   if (!policy_loaded_) {
-    RCLCPP_ERROR(get_logger(), "Policy is not loaded");
+    RCLCPP_ERROR(get_logger(), "[InferenceLoop] Policy is not loaded");
     return;
   }
 
@@ -624,7 +684,7 @@ void RoaControllerNode::InferenceLoop()
   if (!build_observation(tnow)) {
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 2000,
-      "Observation build failed");
+      "[InferenceLoop] Observation build failed");
     return;
   }
 
@@ -635,7 +695,7 @@ void RoaControllerNode::InferenceLoop()
   if (!ok) {
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 2000,
-      "Policy inference failed");
+      "[InferenceLoop] Policy inference failed");
     return;
   }
 
@@ -676,6 +736,9 @@ void RoaControllerNode::InferenceLoop()
 
 void RoaControllerNode::ControlLoop()
 {
+
+  static int loop_count = 0;
+  loop_count++;
   if (this->get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
     return;
   }
@@ -712,12 +775,12 @@ void RoaControllerNode::ControlLoop()
     } else {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000,
-        "RSU solution contains NaN/Inf. Holding previous safe RSU command.");
+        "[ControlLoop] RSU solution contains NaN/Inf. Holding previous safe RSU command.");
     }
-  } else {
+  } else if (loop_count > 3) {  // 초기 제어 루프 2주기는 추론 없이 돌기에 RSU 솔루션이 없음
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 2000,
-      "RSU solution stale or infeasible. Holding previous safe RSU command.");
+      "[ControlLoop] RSU solution stale or infeasible. Holding previous safe RSU command.");
   }
 
   // stale / infeasible이면 hold
@@ -894,22 +957,6 @@ void RoaControllerNode::printControlDebug(
 
   oss << "\n[DEBUG][CONTROL]\n";
   oss << " rsu_ok = " << (rsu_ok ? "true" : "false") << "\n";
-
-  oss << " init_pose      : "
-      << "LHP=" << init_cmd.left_hip_pitch
-      << ", LHR=" << init_cmd.left_hip_roll
-      << ", LHY=" << init_cmd.left_hip_yaw
-      << ", LKP=" << init_cmd.left_knee_pitch
-      << ", RHP=" << init_cmd.right_hip_pitch
-      << ", RHR=" << init_cmd.right_hip_roll
-      << ", RHY=" << init_cmd.right_hip_yaw
-      << ", RKP=" << init_cmd.right_knee_pitch
-      << ", LRU=" << init_cmd.left_rsu_upper
-      << ", LRL=" << init_cmd.left_rsu_lower
-      << ", RRU=" << init_cmd.right_rsu_upper
-      << ", RRL=" << init_cmd.right_rsu_lower
-      << "\n";
-
   oss << " computed_cmd   : "
       << "LHP=" << computed_cmd.left_hip_pitch
       << ", LHR=" << computed_cmd.left_hip_roll
@@ -925,19 +972,19 @@ void RoaControllerNode::printControlDebug(
       << ", RRL=" << computed_cmd.right_rsu_lower
       << "\n";
 
-  oss << " delta(cmd - init): "
-      << "LHP=" << (computed_cmd.left_hip_pitch   - init_cmd.left_hip_pitch)
-      << ", LHR=" << (computed_cmd.left_hip_roll  - init_cmd.left_hip_roll)
-      << ", LHY=" << (computed_cmd.left_hip_yaw   - init_cmd.left_hip_yaw)
-      << ", LKP=" << (computed_cmd.left_knee_pitch - init_cmd.left_knee_pitch)
-      << ", RHP=" << (computed_cmd.right_hip_pitch - init_cmd.right_hip_pitch)
-      << ", RHR=" << (computed_cmd.right_hip_roll  - init_cmd.right_hip_roll)
-      << ", RHY=" << (computed_cmd.right_hip_yaw   - init_cmd.right_hip_yaw)
-      << ", RKP=" << (computed_cmd.right_knee_pitch - init_cmd.right_knee_pitch)
-      << ", LRU=" << (computed_cmd.left_rsu_upper  - init_cmd.left_rsu_upper)
-      << ", LRL=" << (computed_cmd.left_rsu_lower  - init_cmd.left_rsu_lower)
-      << ", RRU=" << (computed_cmd.right_rsu_upper - init_cmd.right_rsu_upper)
-      << ", RRL=" << (computed_cmd.right_rsu_lower - init_cmd.right_rsu_lower);
+  // oss << " delta(cmd - init): "
+  //     << "LHP=" << (computed_cmd.left_hip_pitch   - init_cmd.left_hip_pitch)
+  //     << ", LHR=" << (computed_cmd.left_hip_roll  - init_cmd.left_hip_roll)
+  //     << ", LHY=" << (computed_cmd.left_hip_yaw   - init_cmd.left_hip_yaw)
+  //     << ", LKP=" << (computed_cmd.left_knee_pitch - init_cmd.left_knee_pitch)
+  //     << ", RHP=" << (computed_cmd.right_hip_pitch - init_cmd.right_hip_pitch)
+  //     << ", RHR=" << (computed_cmd.right_hip_roll  - init_cmd.right_hip_roll)
+  //     << ", RHY=" << (computed_cmd.right_hip_yaw   - init_cmd.right_hip_yaw)
+  //     << ", RKP=" << (computed_cmd.right_knee_pitch - init_cmd.right_knee_pitch)
+  //     << ", LRU=" << (computed_cmd.left_rsu_upper  - init_cmd.left_rsu_upper)
+  //     << ", LRL=" << (computed_cmd.left_rsu_lower  - init_cmd.left_rsu_lower)
+  //     << ", RRU=" << (computed_cmd.right_rsu_upper - init_cmd.right_rsu_upper)
+  //     << ", RRL=" << (computed_cmd.right_rsu_lower - init_cmd.right_rsu_lower);
 
   RCLCPP_INFO(get_logger(), "%s", oss.str().c_str());
 }
